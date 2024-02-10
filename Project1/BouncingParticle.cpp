@@ -10,6 +10,10 @@
 #include <string>
 #include <chrono>
 #include <mutex>
+#include <queue>
+#include <atomic>
+#include <thread>
+#include <functional>
 
 template<typename T>
 const T& clamp(const T& value, const T& min, const T& max) {
@@ -184,6 +188,39 @@ private:
     }
 };
 
+// Struct to hold parameters for particle updates
+struct ParticleUpdateParams {
+    float deltaTime;
+    int canvasWidth;
+    int canvasHeight;
+    std::vector<sf::VertexArray> walls;
+    int startIdx;
+    int endIdx;
+};
+
+// Function executed by each thread to update particles
+void updateParticles(std::queue<ParticleUpdateParams>& paramsQueue, std::vector<Particle>& particles, int startIdx, int endIdx) {
+    std::mutex paramsQueueMutex;
+
+    while (true) {
+        ParticleUpdateParams params;
+        {
+            std::lock_guard<std::mutex> lock(paramsQueueMutex);
+            if (paramsQueue.empty()) {
+                return;
+            }
+            params = paramsQueue.front();
+            paramsQueue.pop();
+        }
+
+        // Ensure that the loop iterates within the specified range
+        for (int i = std::max(startIdx, params.startIdx); i <= std::min(endIdx, params.endIdx); ++i) {
+            particles[i].update(params.deltaTime, params.canvasWidth, params.canvasHeight, params.walls);
+        }
+    }
+}
+
+
 int main() {
     // Create SFML window
     sf::RenderWindow window(sf::VideoMode(1280, 720), "Particle Bouncing Application");
@@ -217,6 +254,12 @@ int main() {
     int numParticles = 1;
     std::vector<sf::VertexArray> walls;
 
+    // Define mutex for paramsQueue
+    std::mutex paramsQueueMutex;
+    // Shared queue for parameters
+    std::queue<ParticleUpdateParams> paramsQueue;
+
+
     bool isDrawingLine = false;
     // Line parameters
     sf::Vector2f lineStart(100.0f, 360.0f); // Default line start point
@@ -225,9 +268,19 @@ int main() {
     // Define spawn point for Angle Setting and Speed Setting
     sf::Vector2f spawnPoint(640.0f, 360.0f); // Default spawn point
 
+    // Calculate range of particles for each thread
+    unsigned int numThreads = 128;
+    unsigned int particlesPerThread = numParticles / numThreads;
+    // Start worker threads
+    std::vector<std::thread> threads;
+    for (unsigned int i = 0; i < numThreads; ++i) {
+        int startIdx = i * particlesPerThread;
+        int endIdx = (i == numThreads - 1) ? numParticles - 1 : startIdx + particlesPerThread - 1;
+        threads.emplace_back(updateParticles, std::ref(paramsQueue), std::ref(particles), startIdx, endIdx);
+    }
 
     // Main loop
-
+    
     while (window.isOpen()) {
         // Process events
         sf::Event event;
@@ -357,12 +410,13 @@ int main() {
             walls.clear();
         }
         if (ImGui::Button("Clear last wall")) {
-            walls.pop_back();
+            if (walls.size() > 0) {
+                walls.pop_back();
+            }
         }
 
 
         ImGui::End();
-
 
         // Clear window
         window.clear(sf::Color::Black);
@@ -388,7 +442,12 @@ int main() {
 
         frameCount++;
     }
-
+    
+    // Join threads
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
     // Cleanup
     ImGui::SFML::Shutdown();
 
