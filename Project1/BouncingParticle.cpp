@@ -1,6 +1,7 @@
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <SFML/Graphics.hpp>
-#include <SFML/System/Clock.hpp>
-#include <SFML/System/Time.hpp>
 #include "imgui.h"
 #include "imgui-SFML.h"
 #include <vector>
@@ -14,11 +15,69 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <condition_variable>
+#include <utility>
 
 template<typename T>
 const T& clamp(const T& value, const T& min, const T& max) {
     return (value < min) ? min : ((max < value) ? max : value);
 }
+#include <condition_variable>
+
+class ThreadPool {
+public:
+    ThreadPool(int numThreads) : stop(false) {
+        for (int i = 0; i < numThreads; ++i) {
+            threads.emplace_back([this] {
+                while (true) {
+                    std::function<void()> task;
+
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        condition.wait(lock, [this] { return stop || !tasks.empty(); });
+                        if (stop && tasks.empty()) {
+                            return;
+                        }
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+
+                    task();
+                }
+                });
+        }
+    }
+
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            stop = true;
+        }
+        condition.notify_all();
+        for (std::thread& worker : threads) {
+            worker.join();
+        }
+    }
+
+    template <class F, class... Args>
+
+    // In the ThreadPool class, modify the enqueue method as follows:
+    void enqueue(F&& f, Args&&... args) {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            tasks.emplace([=]() mutable { std::forward<F>(f)(std::forward<Args>(args)...); });
+        }
+        condition.notify_one();
+    }
+
+private:
+    std::vector<std::thread> threads;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queueMutex;
+    std::condition_variable condition;
+    bool stop;
+};
+
 
 // Particle class definition
 class Particle {
@@ -43,7 +102,7 @@ public:
     }
 
     // Update the particle's position based on velocity
-    void update(float deltaTime, int canvasWidth, int canvasHeight, const std::vector<sf::VertexArray>& walls) {
+    void update(float deltaTime, float canvasWidth, float canvasHeight, const std::vector<sf::VertexArray>& walls) {
         std::lock_guard<std::mutex> lock(mutex);
 
         sf::Vector2f nextPosition = position + velocity * deltaTime;
@@ -158,8 +217,6 @@ private:
         return collisionPoint;
     }
 
-
-
     static bool intersects(const sf::Vector2f& p1, const sf::Vector2f& p2, const sf::Vector2f& q1, const sf::Vector2f& q2) {
         float s1_x, s1_y, s2_x, s2_y;
         s1_x = p2.x - p1.x;     s1_y = p2.y - p1.y;
@@ -188,46 +245,10 @@ private:
     }
 };
 
-// Struct to hold parameters for particle updates
-struct ParticleUpdateParams {
-    float deltaTime;
-    int canvasWidth;
-    int canvasHeight;
-    std::vector<sf::VertexArray> walls;
-    int startIdx;
-    int endIdx;
-};
-
-// Function executed by each thread to update particles
-void updateParticles(std::queue<ParticleUpdateParams>& paramsQueue, std::vector<Particle>& particles, int startIdx, int endIdx) {
-    std::mutex paramsQueueMutex;
-
-    while (true) {
-        ParticleUpdateParams params;
-        {
-            std::lock_guard<std::mutex> lock(paramsQueueMutex);
-            if (paramsQueue.empty()) {
-                return;
-            }
-            params = paramsQueue.front();
-            paramsQueue.pop();
-        }
-
-        // Ensure that the loop iterates within the specified range
-        for (int i = std::max(startIdx, params.startIdx); i <= std::min(endIdx, params.endIdx); ++i) {
-            particles[i].update(params.deltaTime, params.canvasWidth, params.canvasHeight, params.walls);
-        }
-    }
-}
-
-
 int main() {
     // Create SFML window
     sf::RenderWindow window(sf::VideoMode(1280, 720), "Particle Bouncing Application");
     window.setFramerateLimit(70); // Limit frame rate to 60 FPS
-
-    sf::Font font; // Default font provided by SFML
-
 
     sf::Clock clock;
     sf::Clock deltaClock;
@@ -247,18 +268,10 @@ int main() {
     float speed = 100.0f;
     float startAngle = 0.0f;
     float endAngle = 180.0f;
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+
     float angle = 45.0f * M_PI / 180.0f; // Convert angle to radians
     int numParticles = 1;
     std::vector<sf::VertexArray> walls;
-
-    // Define mutex for paramsQueue
-    std::mutex paramsQueueMutex;
-    // Shared queue for parameters
-    std::queue<ParticleUpdateParams> paramsQueue;
-
 
     bool isDrawingLine = false;
     // Line parameters
@@ -268,16 +281,12 @@ int main() {
     // Define spawn point for Angle Setting and Speed Setting
     sf::Vector2f spawnPoint(640.0f, 360.0f); // Default spawn point
 
-    // Calculate range of particles for each thread
-    unsigned int numThreads = 128;
-    unsigned int particlesPerThread = numParticles / numThreads;
-    // Start worker threads
-    std::vector<std::thread> threads;
-    for (unsigned int i = 0; i < numThreads; ++i) {
-        int startIdx = i * particlesPerThread;
-        int endIdx = (i == numThreads - 1) ? numParticles - 1 : startIdx + particlesPerThread - 1;
-        threads.emplace_back(updateParticles, std::ref(paramsQueue), std::ref(particles), startIdx, endIdx);
-    }
+    unsigned int numThreads = std::thread::hardware_concurrency();
+    //unsigned int numThreads = 32;
+    // Create a thread pool with the desired number of threads
+    ThreadPool threadPool(numThreads);
+
+
 
     // Main loop
     
@@ -322,7 +331,7 @@ int main() {
         auto currentTime = std::chrono::steady_clock::now();
         auto elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastFpsTime).count() / 1000.0;
         if (elapsedTime >= 0.5) {
-            float valid_fps = frameCount / elapsedTime;
+            double valid_fps = frameCount / elapsedTime;
             fps = valid_fps;
             frameCount = 0;
             lastFpsTime = currentTime;
@@ -418,15 +427,17 @@ int main() {
 
         ImGui::End();
 
+        // Enqueue tasks for particle updates
+        threadPool.enqueue([&particles, deltaTime, canvasWidth, canvasHeight, &walls]() {
+            for (auto& particle : particles) {
+                particle.update(deltaTime, canvasWidth, canvasHeight, walls);
+            }
+            });
+
         // Clear window
         window.clear(sf::Color::Black);
         for (auto& wall : walls) {
             window.draw(wall);
-        }
-
-        // Update particle system
-        for (auto& particle : particles) {
-            particle.update(deltaTime, canvasWidth, canvasHeight, walls);
         }
 
         // Render particles
@@ -443,13 +454,10 @@ int main() {
         frameCount++;
     }
     
-    // Join threads
-    for (auto& thread : threads) {
-        thread.join();
-    }
-    
-    // Cleanup
+    // Cleanup: Explicitly delete the dynamically allocated threadPool
+    delete &threadPool;
     ImGui::SFML::Shutdown();
+
 
     return 0;
 }
