@@ -1,3 +1,6 @@
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <SFML/Graphics.hpp>
 #include <SFML/System/Clock.hpp>
 #include <SFML/System/Time.hpp>
@@ -30,17 +33,6 @@ public:
     Particle(const Particle& other)
         : position(other.position), velocity(other.velocity) {}
 
-    // Assignment operator
-    Particle& operator=(const Particle& other) {
-        if (this != &other) {
-            std::lock(mutex, other.mutex); // Lock both mutexes to avoid deadlock
-            std::lock_guard<std::mutex> self_lock(mutex, std::adopt_lock);
-            std::lock_guard<std::mutex> other_lock(other.mutex, std::adopt_lock);
-            position = other.position;
-            velocity = other.velocity;
-        }
-        return *this;
-    }
 
     // Update the particle's position based on velocity
     void update(float deltaTime, int canvasWidth, int canvasHeight, const std::vector<sf::VertexArray>& walls) {
@@ -247,9 +239,6 @@ int main() {
     float speed = 100.0f;
     float startAngle = 0.0f;
     float endAngle = 180.0f;
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
     float angle = 45.0f * M_PI / 180.0f; // Convert angle to radians
     int numParticles = 1;
     std::vector<sf::VertexArray> walls;
